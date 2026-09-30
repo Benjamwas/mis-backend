@@ -69,6 +69,31 @@ class TeachingAssignment(UUIDPKMixin, TimeStampedModel, SoftDeleteModel, SchoolS
         return f"{self.teacher_id} {self.school_class_id} {self.subject_id}"
 
 
+class StudentGroup(UUIDPKMixin, TimeStampedModel, SchoolScopedModel):
+    class Status(models.TextChoices):
+        ACTIVE = "ACTIVE", "Active"
+        ARCHIVED = "ARCHIVED", "Archived"
+
+    school_class = models.ForeignKey("schools.SchoolClass", on_delete=models.CASCADE, related_name="student_groups")
+    subject = models.ForeignKey(Subject, on_delete=models.SET_NULL, null=True, blank=True, related_name="student_groups")
+    name = models.CharField(max_length=160)
+    description = models.TextField(blank=True, default="")
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.ACTIVE, db_index=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="created_student_groups")
+
+    class Meta:
+        ordering = ["name"]
+
+
+class StudentGroupMember(UUIDPKMixin, TimeStampedModel):
+    group = models.ForeignKey(StudentGroup, on_delete=models.CASCADE, related_name="members")
+    student = models.ForeignKey("people.Student", on_delete=models.CASCADE, related_name="student_groups")
+    is_leader = models.BooleanField(default=False)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["group", "student"], name="uq_student_group_member")]
+
+
 # --------------------------------------------------------------------------
 # Enrollments
 # --------------------------------------------------------------------------

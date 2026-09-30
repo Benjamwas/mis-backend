@@ -31,7 +31,7 @@ def build_report(school, report_type, params=None):
 def _student_list(school, params):
     qs = _student_rows(school)
     rows = []
-    for s in qs.iterator():
+    for s in qs.iterator(chunk_size=500):
         enrollment = s.enrollments.order_by("-created_at").first()
         rows.append({
             "admission_number": s.admission_number,
@@ -59,7 +59,7 @@ def _class_roster(school, params):
     if class_id:
         qs = qs.filter(school_class_id=class_id)
     rows = []
-    for e in qs.iterator():
+    for e in qs.iterator(chunk_size=500):
         rows.append({
             "class": e.school_class.name,
             "grade": e.school_class.grade_level.name if e.school_class.grade_level_id else "",
@@ -87,7 +87,7 @@ def _attendance_summary(school, params):
     if end:
         qs = qs.filter(session__attendance_date__lte=end)
     students = {}
-    for rec in qs.iterator():
+    for rec in qs.iterator(chunk_size=500):
         key = str(rec.student_id)
         a = students.setdefault(key, {"name": rec.student.person.full_name,
                                       "class": rec.session.school_class.name if rec.session.school_class_id else "",
@@ -140,7 +140,7 @@ def _payment_ledger(school, params):
         qs = qs.filter(paid_at__date__lte=end)
     qs = qs.order_by("-paid_at")
     rows = []
-    for p in qs.iterator():
+    for p in qs.iterator(chunk_size=500):
         rows.append({
             "date": p.paid_at.date().isoformat() if p.paid_at else "",
             "student": p.student.person.full_name,
@@ -166,7 +166,7 @@ def _performance(school, params):
     if term_id:
         qs = qs.filter(term_id=term_id)
     rows = []
-    for r in qs.iterator():
+    for r in qs.iterator(chunk_size=500):
         rows.append({
             "student": r.student.full_name,
             "admission_number": r.student.admission_number,
@@ -189,7 +189,7 @@ def _staff_roster(school, params):
 
     qs = Employee.objects.filter(school=school).select_related("person", "department")
     rows = []
-    for e in qs.iterator():
+    for e in qs.iterator(chunk_size=500):
         rows.append({
             "employee_number": e.employee_number,
             "name": e.person.full_name,
@@ -210,7 +210,7 @@ def _parent_contacts(school, params):
 
     qs = Parent.objects.filter(school=school).select_related("person").prefetch_related("children__student__person")
     rows = []
-    for p in qs.iterator():
+    for p in qs.iterator(chunk_size=500):
         students = ", ".join(c.student.full_name for c in p.children.all())
         rows.append({
             "name": p.full_name,
@@ -243,7 +243,7 @@ def _event_attendance(school, params):
 
     qs = Event.objects.filter(school=school).prefetch_related("participants").order_by("-start_time")
     rows = []
-    for e in qs.iterator():
+    for e in qs.iterator(chunk_size=500):
         confirmed = e.participants.exclude(status="CANCELLED").count()
         attended = e.participants.filter(status="ATTENDED").count()
         rows.append({
@@ -264,7 +264,7 @@ def _daily_attendance(school, params):
 
     qs = AttendanceSession.objects.filter(school=school).prefetch_related("records", "school_class").order_by("-attendance_date")
     rows = []
-    for s in qs.iterator():
+    for s in qs.iterator(chunk_size=500):
         total = s.records.count()
         present = s.records.filter(status="PRESENT").count()
         rows.append({
@@ -466,8 +466,59 @@ def dashboard_announcements(school, user):
             published_at__month=timezone.now().month,
         ).count(),
         "unread": Notification.objects.filter(
-            school=school, recipient=user, is_read=False
+            school=school, user=user, is_read=False
         ).count() if user else 0,
+    }
+
+
+def dashboard_student(school, user):
+    """Return the signed-in learner's dashboard metrics and current work."""
+    from apps.academics.models import Assignment, StudentSubjectResult
+    from apps.attendance.models import StudentAttendance
+    from apps.people.models import Student
+
+    student = Student.objects.filter(school=school, person__users=user).select_related("person").first()
+    if student is None:
+        return {"student": None, "assignments": [], "subject_results": [], "attendance": {"present": 0, "absent": 0, "late": 0, "percentage": 0}}
+
+    assignments = Assignment.objects.filter(
+        school=school,
+        teaching_assignment__school_class__enrollments__student=student,
+        status="PUBLISHED",
+    ).select_related("teaching_assignment__subject").distinct().order_by("due_date")[:20]
+    assignment_rows = [
+        {
+            "id": str(item.id),
+            "title": item.title,
+            "subject": item.teaching_assignment.subject.name,
+            "topic": item.topic,
+            "due_date": item.due_date.isoformat() if item.due_date else None,
+            "max_marks": item.max_marks,
+            "status": item.status,
+        }
+        for item in assignments
+    ]
+
+    results = StudentSubjectResult.objects.filter(school=school, student=student).select_related("subject", "term").order_by("-created_at")[:30]
+    result_rows = [
+        {
+            "subject": result.subject.name,
+            "score": float(result.total_score),
+            "grade": result.grade,
+            "term": result.term.name if result.term_id else "",
+        }
+        for result in results
+    ]
+    attendance = StudentAttendance.objects.filter(school=school, student=student)
+    present = attendance.filter(status="PRESENT").count()
+    absent = attendance.filter(status="ABSENT").count()
+    late = attendance.filter(status="LATE").count()
+    total = present + absent + late + attendance.filter(status="EXCUSED").count()
+    return {
+        "student": {"id": str(student.id), "name": student.full_name, "admission_number": student.admission_number},
+        "assignments": assignment_rows,
+        "subject_results": result_rows,
+        "attendance": {"present": present, "absent": absent, "late": late, "percentage": round(present * 100 / max(total, 1), 1)},
     }
 
 

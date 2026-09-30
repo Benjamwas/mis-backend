@@ -10,6 +10,8 @@ from apps.academics.models import (
     Enrollment,
     LearningRecommendation,
     StudentSubjectResult,
+    StudentGroup,
+    StudentGroupMember,
     Subject,
     TeachingAssignment,
 )
@@ -45,6 +47,27 @@ class TeachingAssignmentSerializer(serializers.ModelSerializer):
         read_only_fields = ["school"]
 
 
+class StudentGroupMemberSerializer(serializers.ModelSerializer):
+    student_name = serializers.CharField(source="student.full_name", read_only=True)
+
+    class Meta:
+        model = StudentGroupMember
+        fields = ["id", "group", "student", "student_name", "is_leader", "created_at"]
+
+
+class StudentGroupSerializer(serializers.ModelSerializer):
+    class_name = serializers.CharField(source="school_class.display_name", read_only=True)
+    subject_name = serializers.CharField(source="subject.name", read_only=True)
+    members = StudentGroupMemberSerializer(many=True, read_only=True)
+    member_count = serializers.IntegerField(source="members.count", read_only=True)
+
+    class Meta:
+        model = StudentGroup
+        fields = ["id", "school", "school_class", "class_name", "subject", "subject_name", "name",
+                  "description", "status", "member_count", "members", "created_at"]
+        read_only_fields = ["school"]
+
+
 class EnrollmentSerializer(serializers.ModelSerializer):
     student_name = serializers.CharField(source="student.full_name", read_only=True)
     class_name = serializers.CharField(source="school_class.display_name", read_only=True)
@@ -60,13 +83,50 @@ class EnrollmentSerializer(serializers.ModelSerializer):
 class AssignmentSerializer(serializers.ModelSerializer):
     subject = serializers.CharField(source="teaching_assignment.subject.name", read_only=True)
     class_name = serializers.CharField(source="teaching_assignment.school_class.display_name", read_only=True)
+    my_submission_status = serializers.SerializerMethodField()
+    my_submission_marks = serializers.SerializerMethodField()
+    my_submission_feedback = serializers.SerializerMethodField()
 
     class Meta:
         model = Assignment
         fields = ["id", "school", "teaching_assignment", "topic", "title", "description", "instructions",
                   "max_marks", "due_date", "submission_type", "status", "created_by", "published_at",
-                  "subject", "class_name", "created_at"]
+                  "subject", "class_name", "my_submission_status", "my_submission_marks", "my_submission_feedback", "created_at"]
         read_only_fields = ["school", "created_by", "published_at", "status"]
+
+    def validate(self, attrs):
+        school = self.context.get("school")
+        teaching_assignment = attrs.get("teaching_assignment", getattr(self.instance, "teaching_assignment", None))
+        topic = attrs.get("topic", getattr(self.instance, "topic", None))
+        if school is not None:
+            if teaching_assignment and teaching_assignment.school_id != school.id:
+                raise serializers.ValidationError({"teaching_assignment": "Teaching assignment must belong to the active school."})
+            if topic and topic.school_id != school.id:
+                raise serializers.ValidationError({"topic": "Topic must belong to the active school."})
+        return attrs
+
+    def _submission(self, obj):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        student = getattr(getattr(user, "person", None), "students", None)
+        if not student:
+            return None
+        student = student.filter(school=obj.school_id).first()
+        return obj.submissions.filter(student=student).prefetch_related("grades").first() if student else None
+
+    def get_my_submission_status(self, obj):
+        submission = self._submission(obj)
+        return submission.status if submission else None
+
+    def get_my_submission_marks(self, obj):
+        submission = self._submission(obj)
+        grade = submission.grades.first() if submission else None
+        return str(grade.marks) if grade else None
+
+    def get_my_submission_feedback(self, obj):
+        submission = self._submission(obj)
+        grade = submission.grades.first() if submission else None
+        return grade.feedback if grade else ""
 
 
 class AssignmentSubmissionSerializer(serializers.ModelSerializer):

@@ -15,6 +15,8 @@ from apps.academics.models import (
     Enrollment,
     LearningRecommendation,
     StudentSubjectResult,
+    StudentGroup,
+    StudentGroupMember,
     Subject,
     TeachingAssignment,
 )
@@ -28,6 +30,8 @@ from apps.academics.serializers import (
     EnrollmentSerializer,
     LearningRecommendationSerializer,
     StudentSubjectResultSerializer,
+    StudentGroupMemberSerializer,
+    StudentGroupSerializer,
     SubjectSerializer,
     TeachingAssignmentSerializer,
 )
@@ -39,7 +43,7 @@ from apps.academics.services import (
     submit_assignment,
     transfer_student,
 )
-from apps.common.exceptions import PermissionDeniedError, ValidationFailedError
+from apps.common.exceptions import PermissionDeniedError, TenantIsolationError, ValidationFailedError
 from apps.common.permissions import HasPermission
 from apps.common.viewsets import SchoolScopedViewSet
 
@@ -75,6 +79,53 @@ class ClassSubjectViewSet(SchoolScopedViewSet):
         if class_id:
             qs = qs.filter(school_class_id=class_id)
         return qs
+
+
+class StudentGroupViewSet(SchoolScopedViewSet):
+    queryset = StudentGroup.objects.select_related("school_class", "subject").prefetch_related("members__student__person").all()
+    serializer_class = StudentGroupSerializer
+    permission_classes = [HasPermission]
+    permission_code = "assignment.read"
+    audit_module = "academics"
+    audit_entity_type = "StudentGroup"
+
+    def get_permissions(self):
+        if self.action in ("create", "update", "partial_update", "destroy", "add_member", "remove_member"):
+            self.permission_code = "assignment.create"
+        return super().get_permissions()
+
+    def perform_create(self, serializer):
+        school = self.get_school()
+        if school is None:
+            from apps.common.exceptions import TenantIsolationError
+            raise TenantIsolationError("A school context is required.")
+        school_class = serializer.validated_data.get("school_class")
+        subject = serializer.validated_data.get("subject")
+        if school_class.school_id != school.id or (subject and subject.school_id != school.id):
+            raise ValidationFailedError("Group records must belong to the active school.", code="TENANT_ISOLATION")
+        obj = serializer.save(school=school, created_by=self.request.user)
+        self._audit("student_group.create", obj, new_value={"name": obj.name})
+
+    @action(detail=True, methods=["get"], url_path="members")
+    def members(self, request, pk=None):
+        group = self.get_object()
+        return Response(StudentGroupMemberSerializer(group.members.select_related("student__person").all(), many=True).data)
+
+    @action(detail=True, methods=["post"], url_path="add-member")
+    def add_member(self, request, pk=None):
+        group = self.get_object()
+        from apps.people.models import Student
+        student = get_object_or_404(Student.objects.filter(school=group.school_id), pk=request.data.get("student_id"))
+        member, _ = StudentGroupMember.objects.update_or_create(
+            group=group, student=student, defaults={"is_leader": bool(request.data.get("is_leader", False))}
+        )
+        return Response(StudentGroupMemberSerializer(member).data, status=201)
+
+    @action(detail=True, methods=["post"], url_path="remove-member")
+    def remove_member(self, request, pk=None):
+        group = self.get_object()
+        StudentGroupMember.objects.filter(group=group, student_id=request.data.get("student_id")).delete()
+        return Response({"removed": True})
 
 
 class EnrollmentViewSet(SchoolScopedViewSet):
@@ -153,9 +204,19 @@ class AssignmentViewSet(SchoolScopedViewSet):
     search_fields = ["title"]
 
     def get_queryset(self):
-        return super().get_queryset().select_related(
+        qs = super().get_queryset().select_related(
             "teaching_assignment__subject", "teaching_assignment__school_class", "topic"
         )
+        student = getattr(getattr(self.request.user, "person", None), "students", None)
+        if student:
+            student = student.filter(school=self.get_school()).first()
+            if student:
+                qs = qs.filter(
+                    status=Assignment.Status.PUBLISHED,
+                    teaching_assignment__school_class__enrollments__student=student,
+                    teaching_assignment__school_class__enrollments__status="ACTIVE",
+                ).distinct()
+        return qs
 
     def _enforce_teacher_scope(self, obj):
         """Subject teachers may only manage assignments within their teaching scope."""
@@ -172,7 +233,8 @@ class AssignmentViewSet(SchoolScopedViewSet):
         if school and current_roles & {"SUBJECT_TEACHER", "CLASS_TEACHER"}:
             owner = obj.teaching_assignment.teacher_id
             emp = self.request.user.person.hr_employees.filter(school=school).first()
-            if not emp or emp.id != owner:
+            class_teacher = obj.teaching_assignment.school_class.class_teacher_id
+            if not emp or (emp.id != owner and not ("CLASS_TEACHER" in current_roles and emp.id == class_teacher)):
                 raise PermissionDeniedError()
 
     def get_permissions(self):
@@ -190,10 +252,14 @@ class AssignmentViewSet(SchoolScopedViewSet):
     def get_serializer_context(self):
         ctx = super().get_serializer_context()
         ctx["request"] = self.request
+        ctx["school"] = self.get_school()
         return ctx
 
     def perform_create(self, serializer):
-        obj = serializer.save(created_by=self.request.user)
+        school = self.get_school()
+        if school is None:
+            raise TenantIsolationError("A school context is required.")
+        obj = serializer.save(school=school, created_by=self.request.user)
         self._audit("assignment.create", obj, new_value={"title": obj.title})
 
     def perform_update(self, serializer):
@@ -267,10 +333,22 @@ class AssignmentViewSet(SchoolScopedViewSet):
         self._audit("assignment.grade", obj, new_value={"submission_id": str(submission.id), "marks": str(request.data.get("marks"))})
         from apps.communication.tasks import notify_users
 
-        student_user = submission.student.person.users.filter(is_active=True).first()
+        student_user = submission.student.person.users.exclude(status__in=["INACTIVE", "SUSPENDED"]).first()
         if student_user:
             notify_users.delay([student_user.id], title="Assignment Graded", body=f"'{obj.title}' has been graded.")
         return Response(AssignmentSubmissionSerializer(graded).data)
+
+    @action(detail=True, methods=["post"], permission_classes=[HasPermission])
+    def request_resubmission(self, request, pk=None):
+        self.permission_code = "assignment.grade"
+        self.check_permission_code(self.permission_code)
+        obj = self.get_object()
+        self._enforce_teacher_scope(obj)
+        submission = get_object_or_404(obj.submissions, pk=request.data.get("submission_id"))
+        submission.status = AssignmentSubmission.Status.RETURNED
+        submission.save(update_fields=["status", "updated_at"])
+        self._audit("assignment.resubmission_request", obj, new_value={"submission_id": str(submission.id)})
+        return Response(AssignmentSubmissionSerializer(submission).data)
 
 
 class AssessmentViewSet(SchoolScopedViewSet):
@@ -337,7 +415,12 @@ class ResultViewSet(SchoolScopedViewSet):
     filterset_fields = ["student", "subject", "term", "status"]
 
     def get_queryset(self):
-        return super().get_queryset().select_related("student__person", "subject", "term")
+        qs = super().get_queryset().select_related("student__person", "subject", "term")
+        from apps.people.services import parent_for_user
+        parent = parent_for_user(self.request.user, self.get_school())
+        if parent is not None:
+            qs = qs.filter(student_id__in=parent.children.values_list("student_id", flat=True), status="PUBLISHED")
+        return qs
 
     def get_permissions(self):
         action_map = {"create": "result.create", "update": "result.update", "partial_update": "result.update"}

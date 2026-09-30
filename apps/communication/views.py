@@ -1,5 +1,6 @@
 """Communication views."""
 from django.shortcuts import get_object_or_404
+from django.conf import settings
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -25,6 +26,11 @@ class NotificationViewSet(ModelViewSet):
 
     def get_queryset(self):
         return Notification.objects.filter(user=self.request.user).order_by("-created_at")
+
+    def get_permissions(self):
+        if self.action == "send_message":
+            self.permission_code = "notification.create"
+        return super().get_permissions()
 
     def perform_destroy(self, instance):
         if instance.user_id != self.request.user.id:
@@ -57,6 +63,36 @@ class NotificationViewSet(ModelViewSet):
     @action(detail=False, methods=["get"])
     def unread_count(self, request):
         return Response({"count": Notification.objects.filter(user=request.user, is_read=False).count()})
+
+    @action(detail=False, methods=["post"])
+    def send_message(self, request):
+        """Deliver a parent message to the linked child's class teacher."""
+        from apps.people.models import ParentStudent
+
+        student_id = request.data.get("student_id")
+        body = (request.data.get("body") or "").strip()
+        relation = ParentStudent.objects.filter(
+            parent__person_id=request.user.person_id,
+            parent__school=resolve_school_context(request),
+            student_id=student_id,
+        ).select_related("parent__person", "student").first()
+        if not relation or not body:
+            return Response({"message": "A linked student and message are required."}, status=400)
+        enrollment = relation.student.enrollments.filter(status="ACTIVE").select_related("school_class__class_teacher").first()
+        employee = enrollment.school_class.class_teacher if enrollment else None
+        teacher = employee.person.users.exclude(status__in=["INACTIVE", "SUSPENDED"]).first() if employee else None
+        if not teacher:
+            return Response({"message": "No class teacher is linked to this student."}, status=404)
+        notification = Notification.objects.create(
+            user=teacher,
+            school=relation.parent.school,
+            title=f"Parent message from {relation.parent.full_name}",
+            body=body,
+            type="PARENT_MESSAGE",
+            entity_type="Student",
+            entity_id=str(relation.student_id),
+        )
+        return Response(NotificationSerializer(notification).data, status=201)
 
 
 class AnnouncementViewSet(SchoolScopedViewSet):
@@ -124,7 +160,10 @@ class BroadcastCampaignViewSet(SchoolScopedViewSet):
         else:
             obj.status = "PROCESSING"
             obj.save(update_fields=["status", "updated_at"])
-            dispatch_broadcast.delay(str(obj.id))
+            if settings.EMAIL_DELIVERY_MODE == "sync" and obj.channel == "EMAIL":
+                dispatch_broadcast.apply(args=[str(obj.id)]).get()
+            else:
+                dispatch_broadcast.delay(str(obj.id))
         self._audit("campaign.send", obj, new_value={"status": obj.status})
         return Response(BroadcastCampaignSerializer(obj).data)
 
@@ -141,14 +180,16 @@ class BroadcastCampaignViewSet(SchoolScopedViewSet):
 
     @action(detail=False, methods=["post"])
     def send_email(self, request):
-        from apps.communication.tasks import send_email
+        from apps.communication.tasks import dispatch_email
 
         to = request.data.get("to")
         subject = request.data.get("subject")
         body = request.data.get("body")
         school = self.get_school()
-        send_email.delay(to, subject, body, school_id=school.id if school else None)
-        return Response({"message": "Email queued."}, status=status.HTTP_202_ACCEPTED)
+        result = dispatch_email(to, subject, body, school_id=school.id if school else None)
+        message = "Email sent." if settings.EMAIL_DELIVERY_MODE == "sync" and result.get("ok") else "Email queued."
+        response_status = status.HTTP_200_OK if settings.EMAIL_DELIVERY_MODE == "sync" else status.HTTP_202_ACCEPTED
+        return Response({"message": message, "delivery": result}, status=response_status)
 
     @action(detail=False, methods=["post"])
     def send_whatsapp(self, request):

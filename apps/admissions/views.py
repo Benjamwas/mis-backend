@@ -106,9 +106,9 @@ class AdmissionApplicationViewSet(SchoolScopedViewSet):
         obj = self.get_object()
         submit_application(obj, by=request.user)
         self._audit("admission.submit", obj, old_value={"status": "DRAFT"}, new_value={"status": obj.status})
-        from apps.communication.tasks import send_transactional_email_job
+        from apps.communication.tasks import dispatch_transactional_email
 
-        send_transactional_email_job.delay(
+        dispatch_transactional_email(
             to_email=obj.applicant.guardian_email or obj.applicant.email,
             subject="Admission Application Received",
             template="application_received",
@@ -122,9 +122,9 @@ class AdmissionApplicationViewSet(SchoolScopedViewSet):
         obj = update_application_status(obj, AdmissionApplication.ACCEPTED, by=request.user,
                                         comment=request.data.get("comment", ""))
         self._audit("admission.approve", obj, old_value={"submitted": True}, new_value={"status": obj.status})
-        from apps.communication.tasks import send_transactional_email_job
+        from apps.communication.tasks import dispatch_transactional_email
 
-        send_transactional_email_job.delay(
+        dispatch_transactional_email(
             to_email=obj.applicant.guardian_email or obj.applicant.email,
             subject="Admission Offer",
             template="application_accepted",
@@ -213,7 +213,7 @@ class AdmissionApplicationViewSet(SchoolScopedViewSet):
         buffer = io.StringIO()
         writer = csv.writer(buffer)
         writer.writerow(["Application No", "Applicant", "Email", "Phone", "Grade", "Academic Year", "Status", "Submitted At"])
-        for app in qs.iterator():
+        for app in qs.iterator(chunk_size=500):
             writer.writerow([
                 app.application_number, app.applicant.full_name, app.applicant.email, app.applicant.phone,
                 app.grade_level.name, app.academic_year.name, app.status,

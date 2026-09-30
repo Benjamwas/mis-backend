@@ -44,7 +44,9 @@ def request_leave(employee, leave_type, start_date, end_date, reason="", by=None
     if overlapping.exists():
         raise ConflictError("Leave request overlaps an existing request.", code="LEAVE_OVERLAP")
 
-    taken = days_taken_in_period(employee, leave_type, leave_type_interval(leave_type))
+    period_start = leave_type_interval(leave_type)
+    period_end = period_start.replace(year=period_start.year + 1) - timedelta(days=1)
+    taken = days_taken_in_period(employee, leave_type, period_start, period_end)
     requested = (end_date - start_date).days + 1
     if leave_type.days_allowed and (taken + requested) > leave_type.days_allowed:
         raise ConflictError(
@@ -53,7 +55,7 @@ def request_leave(employee, leave_type, start_date, end_date, reason="", by=None
         )
 
     return LeaveRequest.objects.create(
-        employee=employee, leave_type=leave_type, start_date=start_date,
+        school=employee.school, employee=employee, leave_type=leave_type, start_date=start_date,
         end_date=end_date, reason=reason,
     )
 
@@ -118,6 +120,7 @@ def run_payroll(payroll_period, employee_ids=None, by=None, base_overrides=None,
             payroll_period=payroll_period,
             employee=emp,
             defaults={
+                "school": payroll_period.school,
                 "gross_salary": base,
                 "total_deductions": 0,
                 "net_salary": 0,

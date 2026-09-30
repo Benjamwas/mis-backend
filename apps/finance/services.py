@@ -208,19 +208,18 @@ def generate_fee_invoice(*, school, student, term=None, by=None, due_days=14):
 def fee_balance_report(school):
     """Student-by-student outstanding balances used by dashboards and reports."""
     rows = []
-    accounts = StudentFeeAccount.objects.filter(school=school).select_related("student__person").prefetch_related(
-        "student__grade_level"
-    )
+    accounts = StudentFeeAccount.objects.filter(school=school).select_related("student__person")
     for account in accounts:
         balance = account.balance
         if balance <= 0:
             continue
+        enrollment = account.student.enrollments.select_related("school_class__grade_level").order_by("-created_at").first()
         rows.append({
             "student": {
                 "id": str(account.student.id),
                 "name": account.student.full_name,
                 "admission_number": account.student.admission_number,
-                "grade": getattr(account.student.grade_level, "name", "") if account.student.grade_level_id else "",
+                "grade": enrollment.school_class.grade_level.name if enrollment and enrollment.school_class.grade_level_id else "",
             },
             "balance": balance,
         })

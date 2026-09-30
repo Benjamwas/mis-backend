@@ -93,3 +93,50 @@ class StudentTopicProgress(UUIDPKMixin, TimeStampedModel, SchoolScopedModel):
         else:
             self.status = ProgressStatus.NOT_STARTED
         self.save(update_fields=["progress_percentage", "status", "last_activity_at", "updated_at"])
+
+
+class Quiz(UUIDPKMixin, TimeStampedModel, SoftDeleteModel, SchoolScopedModel):
+    class Status(models.TextChoices):
+        DRAFT = "DRAFT", "Draft"
+        PUBLISHED = "PUBLISHED", "Published"
+        CLOSED = "CLOSED", "Closed"
+
+    topic = models.ForeignKey(Topic, on_delete=models.CASCADE, related_name="quizzes")
+    title = models.CharField(max_length=200)
+    instructions = models.TextField(blank=True, default="")
+    questions = models.JSONField(default=list)
+    max_attempts = models.PositiveIntegerField(default=2)
+    pass_percentage = models.PositiveIntegerField(default=60)
+    time_limit_minutes = models.PositiveIntegerField(null=True, blank=True)
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.DRAFT, db_index=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="created_quizzes")
+    published_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["created_at"]
+
+    @property
+    def question_count(self):
+        return len(self.questions or [])
+
+
+class QuizAttempt(UUIDPKMixin, TimeStampedModel, SoftDeleteModel, SchoolScopedModel):
+    class Status(models.TextChoices):
+        IN_PROGRESS = "IN_PROGRESS", "In Progress"
+        SUBMITTED = "SUBMITTED", "Submitted"
+
+    quiz = models.ForeignKey(Quiz, on_delete=models.CASCADE, related_name="attempts")
+    student = models.ForeignKey("people.Student", on_delete=models.CASCADE, related_name="quiz_attempts")
+    attempt_number = models.PositiveIntegerField(default=1)
+    answers = models.JSONField(default=list)
+    score = models.PositiveIntegerField(default=0)
+    percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    status = models.CharField(max_length=15, choices=Status.choices, default=Status.IN_PROGRESS, db_index=True)
+    started_at = models.DateTimeField(auto_now_add=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["quiz", "student", "attempt_number"], name="uq_quiz_student_attempt"),
+        ]

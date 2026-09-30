@@ -22,7 +22,7 @@ class ReadinessView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
-        checks = {"database": False, "redis": False}
+        checks = {"database": False, "redis": not settings.REDIS_REQUIRED}
         try:
             with connection.cursor() as cursor:
                 cursor.execute("SELECT 1")
@@ -30,12 +30,13 @@ class ReadinessView(APIView):
         except Exception as exc:  # noqa: BLE001
             logger.error("readiness db check failed: %s", exc)
 
-        try:
-            client = Redis.from_url(settings.REDIS_URL, socket_connect_timeout=3)
-            client.ping()
-            checks["redis"] = True
-        except Exception as exc:  # noqa: BLE001
-            logger.error("readiness redis check failed: %s", exc)
+        if settings.REDIS_REQUIRED:
+            try:
+                client = Redis.from_url(settings.REDIS_URL, socket_connect_timeout=3)
+                client.ping()
+                checks["redis"] = True
+            except Exception as exc:  # noqa: BLE001
+                logger.error("readiness redis check failed: %s", exc)
 
         healthy = all(checks.values())
         return Response({"healthy": healthy, "checks": checks}, status=200 if healthy else 503)

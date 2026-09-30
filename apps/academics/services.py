@@ -195,7 +195,7 @@ def publish_results(result_ids, school, by=None):
     from apps.people.services import student_guardian_users
 
     user_ids = set(student_guardian_users(results[0].student))
-    student_user = results[0].student.person.users.filter(is_active=True).first()
+    student_user = results[0].student.person.users.exclude(status__in=["INACTIVE", "SUSPENDED"]).first()
     if student_user:
         user_ids.add(student_user.id)
     if user_ids:

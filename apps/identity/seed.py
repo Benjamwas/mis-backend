@@ -19,7 +19,7 @@ _PERMISSIONS = {
     "school": ["read", "update"],
     "user": ["read", "create", "update", "delete", "manage-role"],
     "module": ["read", "manage"],
-    "dashboard": ["read"],
+    "dashboard": ["read", "finance", "hr"],
     "report": ["read", "export"],
     "audit": ["read"],
     "student": ["read", "create", "update", "delete"],
@@ -112,7 +112,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "notification", "communication", "file",
     ),
     "PARENT": _codes_for(
-        "dashboard", "student", "result", "attendance", "fee", "invoice", "payment",
+        "dashboard", "parent", "student", "result", "attendance", "fee", "invoice", "payment",
         "receipt", "event", "announcement", "notification", "communication",
     ),
     "STUDENT": _codes_for(
@@ -120,6 +120,14 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "attendance", "event", "announcement", "notification", "file",
     ),
 }
+
+# Dashboard finance/HR views are portal-specific. Teachers, parents and students
+# keep only the read-level overview; finance and HR admins do not cross portal
+# lines. SUPER_ADMIN/SCHOOL_ADMIN retain both via their "dashboard" module grant.
+for _role in ("CLASS_TEACHER", "SUBJECT_TEACHER", "PARENT", "STUDENT"):
+    ROLE_PERMISSIONS[_role] = ROLE_PERMISSIONS[_role] - {"dashboard.finance", "dashboard.hr"}
+ROLE_PERMISSIONS["HR_ADMIN"].discard("dashboard.finance")
+ROLE_PERMISSIONS["FINANCE_ADMIN"].discard("dashboard.hr")
 
 
 def permissions_for_role(role_code: str) -> set[str]:

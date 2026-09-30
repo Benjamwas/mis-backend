@@ -1,5 +1,6 @@
 """HR API views."""
 from django.shortcuts import get_object_or_404
+from django.utils.dateparse import parse_date
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -161,9 +162,14 @@ class LeaveRequestViewSet(SchoolScopedViewSet):
         emp = resolve_employee_for_user(request.user, school) if request.data.get("employee_id") is None else None
         employee = get_object_or_404(Employee.objects.filter(school=school), pk=request.data.get("employee_id")) if request.data.get("employee_id") else emp
         leave_type = get_object_or_404(LeaveType.objects.filter(school=school), pk=request.data.get("leave_type_id"))
+        start_date = parse_date(str(request.data.get("start_date", "")))
+        end_date = parse_date(str(request.data.get("end_date", "")))
+        if start_date is None or end_date is None:
+            from apps.common.exceptions import ValidationFailedError
+            raise ValidationFailedError("Valid start_date and end_date are required.", code="INVALID_LEAVE_DATES")
         req = request_leave(
             employee, leave_type,
-            request.data.get("start_date"), request.data.get("end_date"),
+            start_date, end_date,
             reason=request.data.get("reason", ""), by=request.user,
         )
         self._audit("leave.request", req, new_value={"start": req.start_date.isoformat(), "end": req.end_date.isoformat()})
@@ -183,14 +189,16 @@ class LeaveRequestViewSet(SchoolScopedViewSet):
         obj = self.get_object()
         approved = approve_leave(obj, request.user, request.data.get("comment", ""))
         self._audit("leave.approve", obj, old_value={"status": "PENDING"}, new_value={"status": obj.status})
-        from apps.communication.tasks import send_transactional_email_job
+        from apps.communication.tasks import dispatch_transactional_email
 
-        send_transactional_email_job.delay(
-            to_email=obj.employee.person.email or obj.employee.person.phone,
-            subject="Leave Approved",
-            template="leave_approved",
-            context={"name": obj.employee.full_name, "leave_type": obj.leave_type.name, "dates": f"{obj.start_date} to {obj.end_date}"},
-        )
+        if obj.employee.person.email:
+            dispatch_transactional_email(
+                to_email=obj.employee.person.email,
+                subject="Leave Approved",
+                template="leave_approved",
+                context={"name": obj.employee.full_name, "leave_type": obj.leave_type.name, "dates": f"{obj.start_date} to {obj.end_date}"},
+                school_id=obj.school_id,
+            )
         return Response(LeaveRequestSerializer(approved).data)
 
     @action(detail=True, methods=["post"])
@@ -198,14 +206,16 @@ class LeaveRequestViewSet(SchoolScopedViewSet):
         obj = self.get_object()
         rejected = reject_leave(obj, request.user, request.data.get("comment", ""))
         self._audit("leave.reject", obj, old_value={"status": "PENDING"}, new_value={"status": obj.status})
-        from apps.communication.tasks import send_transactional_email_job
+        from apps.communication.tasks import dispatch_transactional_email
 
-        send_transactional_email_job.delay(
-            to_email=obj.employee.person.email or obj.employee.person.phone,
-            subject="Leave Request Update",
-            template="leave_rejected",
-            context={"name": obj.employee.full_name, "leave_type": obj.leave_type.name},
-        )
+        if obj.employee.person.email:
+            dispatch_transactional_email(
+                to_email=obj.employee.person.email,
+                subject="Leave Request Update",
+                template="leave_rejected",
+                context={"name": obj.employee.full_name, "leave_type": obj.leave_type.name},
+                school_id=obj.school_id,
+            )
         return Response(LeaveRequestSerializer(rejected).data)
 
 

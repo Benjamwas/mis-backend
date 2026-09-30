@@ -257,6 +257,9 @@ SUPABASE_STORAGE_BUCKET = env_str("SUPABASE_STORAGE_BUCKET", "sala-files")
 REDIS_URL = env_str("REDIS_URL", "redis://localhost:6379/0")
 CELERY_BROKER_URL = env_str("CELERY_BROKER_URL", "redis://localhost:6379/1")
 CELERY_RESULT_BACKEND = env_str("CELERY_REDIS_URL", "redis://localhost:6379/1")
+REDIS_REQUIRED = env_bool("REDIS_REQUIRED", ENVIRONMENT != "development")
+CELERY_TASK_ALWAYS_EAGER = env_bool("CELERY_TASK_ALWAYS_EAGER", ENVIRONMENT == "development")
+CELERY_TASK_EAGER_PROPAGATES = env_bool("CELERY_TASK_EAGER_PROPAGATES", ENVIRONMENT == "development")
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
@@ -277,6 +280,9 @@ EMAIL_USE_TLS = env_bool("EMAIL_USE_TLS", True)
 DEFAULT_FROM_EMAIL = env_str("DEFAULT_FROM_EMAIL", "SALA <no-reply@sala.example.com>")
 if DEBUG and not EMAIL_HOST:
     EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
+# Development can deliver email inline when Redis/Celery is not available. Set
+# EMAIL_DELIVERY_MODE=async in production when a Celery worker is running.
+EMAIL_DELIVERY_MODE = env_str("EMAIL_DELIVERY_MODE", "sync" if ENVIRONMENT == "development" else "async").lower()
 
 # --------------------------------------------------------------------------
 # Communication providers

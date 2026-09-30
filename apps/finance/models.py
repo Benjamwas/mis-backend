@@ -60,7 +60,7 @@ class StudentFeeAccount(UUIDPKMixin, TimeStampedModel, SchoolScopedModel):
 
     @property
     def balance(self):
-        invoiced = self.invoices.aggregate(
+        invoiced = self.student.invoices.aggregate(
             total=models.Sum("amount_due"), paid=models.Sum("amount_paid"), adjustments=models.Sum("adjustments")
         )
         b = (invoiced["total"] or 0) - (invoiced["paid"] or 0) + (invoiced["adjustments"] or 0)

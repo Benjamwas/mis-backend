@@ -133,6 +133,21 @@ def send_whatsapp(self, to: str, body: str, template_code: str = "", variables: 
     return {"ok": False, "log_id": str(log.id), "error": log.error}
 
 
+def dispatch_email(to: str, subject: str, body: str, html: str = "", school_id=None, idempotency_key=""):
+    """Send email inline when Celery is unavailable, otherwise queue it."""
+    kwargs = {
+        "to": to,
+        "subject": subject,
+        "body": body,
+        "html": html,
+        "school_id": school_id,
+        "idempotency_key": idempotency_key,
+    }
+    if settings.EMAIL_DELIVERY_MODE == "sync":
+        return send_email.apply(kwargs=kwargs).get()
+    return send_email.delay(**kwargs)
+
+
 @shared_task
 def notify_users(user_ids, title, body="", entity_type="", entity_id=None, school_id=None, type_="INFO"):
     """Create in-app notifications for a list of users."""
@@ -156,11 +171,32 @@ def send_transactional_email_job(to_email: str, subject: str, template: str, con
     """Render a simple template body and enqueue email delivery."""
     context = context or {}
     body = _render_template(template, context)
-    return send_email.delay(to_email, subject, body, school_id=school_id, idempotency_key=f"tpl:{template}:{to_email}:{subject}:{context.get('token', '')}")
+    return dispatch_email(
+        to_email,
+        subject,
+        body,
+        school_id=school_id,
+        idempotency_key=f"tpl:{template}:{to_email}:{subject}:{context.get('token', '')}",
+    )
+
+
+def dispatch_transactional_email(to_email: str, subject: str, template: str, context: dict | None = None, school_id=None):
+    """Render and deliver a transactional email without requiring a broker."""
+    context = context or {}
+    return dispatch_email(
+        to_email,
+        subject,
+        _render_template(template, context),
+        school_id=school_id,
+        idempotency_key=f"tpl:{template}:{to_email}:{subject}:{context.get('token', '')}",
+    )
 
 
 _TEMPLATES = {
     "password_reset": "Hello {name},\n\nUse this link to reset your password: {reset_link}\n\nIf you did not request this, ignore this email.",
+    "event_confirmation": "Hello {name},\n\nYour registration for {event} is confirmed.\nDate and time: {start_time}\nVenue: {venue}.",
+    "application_received": "Hello {name},\n\nWe received application {application_number}.",
+    "application_accepted": "Hello {name},\n\nApplication {application_number} has been accepted.",
     "payment_receipt": "Hello {name},\n\nWe received your payment of KES {amount}. Receipt: {receipt_number}.\n\nThank you.",
     "assignment_published": "Hello {name},\n\nNew assignment '{title}' has been published for {subject}.",
     "result_published": "Hello {name},\n\nResults for {term} have been published.",
@@ -190,7 +226,7 @@ def notify_enrolled_class_students(school_id, class_id, title, body="", type_="I
     ).select_related("person")
     user_ids = []
     for s in students:
-        u = s.person.users.filter(is_active=True).first()
+        u = s.person.users.exclude(status__in=["INACTIVE", "SUSPENDED"]).first()
         if u:
             user_ids.append(u.id)
     if user_ids:
@@ -219,8 +255,8 @@ def dispatch_broadcast(campaign_id):
                 send_sms.delay(rec.contact, campaign.message, school_id=campaign.school_id,
                                idempotency_key=f"camp:{campaign.id}:{rec.id}")
             elif campaign.channel == Channel.EMAIL:
-                send_email.delay(rec.contact, campaign.title, campaign.message, school_id=campaign.school_id,
-                                 idempotency_key=f"camp:{campaign.id}:{rec.id}")
+                dispatch_email(rec.contact, campaign.title, campaign.message, school_id=campaign.school_id,
+                               idempotency_key=f"camp:{campaign.id}:{rec.id}")
             elif campaign.channel == Channel.WHATSAPP:
                 send_whatsapp.delay(rec.contact, campaign.message, school_id=campaign.school_id,
                                     idempotency_key=f"camp:{campaign.id}:{rec.id}")

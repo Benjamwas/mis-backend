@@ -3,6 +3,7 @@ from django.shortcuts import get_object_or_404
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
 
 from apps.audit.services import audit
 from apps.common.exceptions import ValidationFailedError
@@ -49,6 +50,10 @@ class StudentViewSet(SchoolScopedViewSet):
         search = self.request.query_params.get("search")
         if search:
             qs = self.filter_queryset(qs) if self.action == "list" else qs
+        from apps.people.services import parent_for_user
+        parent = parent_for_user(self.request.user, self.get_school())
+        if parent is not None:
+            qs = qs.filter(id__in=parent.children.values_list("student_id", flat=True))
         return qs.distinct()
 
     def perform_create(self, serializer):
@@ -203,6 +208,12 @@ class ParentViewSet(SchoolScopedViewSet):
             self.permission_code = "parent.update"
         return super().get_permissions()
 
+    @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated])
+    def me(self, request):
+        from apps.people.services import parent_for_user
+        parent = parent_for_user(request.user, self.get_school())
+        return Response(ParentSerializer(parent).data if parent else None)
+
     def get_serializer_context(self):
         ctx = super().get_serializer_context()
         ctx["school"] = self.get_school()
@@ -216,9 +227,12 @@ class ParentViewSet(SchoolScopedViewSet):
         obj = serializer.save()
         self._audit("parent.update", obj, new_value={"name": obj.full_name})
 
-    @action(detail=True, methods=["get"], permission_classes=[HasPermission])
+    @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated])
     def children(self, request, pk=None):
         obj = self.get_object()
+        if obj.person_id != getattr(request.user, "person_id", None) and not request.user.is_staff and not request.user.is_superuser:
+            from apps.common.exceptions import PermissionDeniedError
+            raise PermissionDeniedError()
         rels = obj.children.select_related("student__person")
         return Response([ParentStudentSerializer(r).data for r in rels])
 

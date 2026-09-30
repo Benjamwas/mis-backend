@@ -35,7 +35,12 @@ class AttendanceSessionViewSet(SchoolScopedViewSet):
     filterset_fields = ["school_class", "term", "attendance_date"]
 
     def get_queryset(self):
-        return super().get_queryset().select_related("school_class", "term")
+        qs = super().get_queryset().select_related("school_class", "term")
+        from apps.people.services import parent_for_user
+        parent = parent_for_user(self.request.user, self.get_school())
+        if parent is not None:
+            qs = qs.filter(records__student_id__in=parent.children.values_list("student_id", flat=True)).distinct()
+        return qs
 
     def get_permissions(self):
         if self.action in ("create", "records"):

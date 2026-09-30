@@ -6,6 +6,7 @@ from django.db import transaction
 
 from apps.common.exceptions import ValidationFailedError
 from apps.identity.models import Person, Role, RoleCode, UserRole
+from apps.people.models import Parent
 
 logger = logging.getLogger("apps.people")
 
@@ -68,6 +69,20 @@ def students_related_to_parent(parent) -> list:
     """Students linked to a parent within the parent's school."""
     qs = parent.children.select_related("student__person", "student__school")
     return [row.student for row in qs]
+
+
+def parent_for_user(user, school=None):
+    if not user or not getattr(user, "person_id", None):
+        return None
+    qs = Parent.objects.filter(person_id=user.person_id)
+    if school is not None:
+        qs = qs.filter(school=school)
+    return qs.first()
+
+
+def parent_student_ids(user, school=None):
+    parent = parent_for_user(user, school)
+    return list(parent.children.values_list("student_id", flat=True)) if parent else []
 
 
 def student_guardian_users(student) -> list[User]:

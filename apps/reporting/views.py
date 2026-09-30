@@ -14,6 +14,7 @@ from apps.reporting.services import (
     dashboard_hr,
     dashboard_overview,
     dashboard_performance,
+    dashboard_student,
     dashboard_students,
     render_report_pdf,
 )
@@ -140,6 +141,15 @@ class DashboardViewSet(SchoolScopedViewSet):
     audit_module = "reporting"
     audit_entity_type = "Dashboard"
 
+    PORTAL_PERMISSION_CODES = {
+        "finance": "dashboard.finance",
+        "hr": "dashboard.hr",
+    }
+
+    def get_permissions(self):
+        self.permission_code = self.PORTAL_PERMISSION_CODES.get(self.action or "list", "dashboard.read")
+        return super().get_permissions()
+
     def get_queryset(self):
         return []
 
@@ -179,3 +189,7 @@ class DashboardViewSet(SchoolScopedViewSet):
     @action(detail=False, methods=["get"])
     def announcements(self, request):
         return Response(dashboard_announcements(self._school(), request.user))
+
+    @action(detail=False, methods=["get"])
+    def student(self, request):
+        return Response(dashboard_student(self._school(), request.user))

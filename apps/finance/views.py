@@ -113,6 +113,10 @@ class InvoiceViewSet(SchoolScopedViewSet):
 
     def get_queryset(self):
         qs = super().get_queryset()
+        from apps.people.services import parent_for_user
+        parent = parent_for_user(self.request.user, self.get_school())
+        if parent is not None:
+            qs = qs.filter(student_id__in=parent.children.values_list("student_id", flat=True))
         status_param = self.request.query_params.get("status")
         if status_param:
             qs = qs.filter(status=status_param)
@@ -171,6 +175,14 @@ class PaymentViewSet(SchoolScopedViewSet):
     audit_module = "finance"
     audit_entity_type = "Payment"
     filterset_fields = ["student", "status", "method"]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        from apps.people.services import parent_for_user
+        parent = parent_for_user(self.request.user, self.get_school())
+        if parent is not None:
+            qs = qs.filter(student_id__in=parent.children.values_list("student_id", flat=True))
+        return qs
 
     def get_permissions(self):
         if self.action == "create":
@@ -284,6 +296,14 @@ class ReceiptViewSet(SchoolScopedViewSet):
     audit_module = "finance"
     audit_entity_type = "Receipt"
     filterset_fields = ["student", "payment"]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        from apps.people.services import parent_for_user
+        parent = parent_for_user(self.request.user, self.get_school())
+        if parent is not None:
+            qs = qs.filter(student_id__in=parent.children.values_list("student_id", flat=True))
+        return qs
 
     def get_permissions(self):
         if self.action in ("create",):

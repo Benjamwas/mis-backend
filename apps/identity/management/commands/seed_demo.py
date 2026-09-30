@@ -9,7 +9,16 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.utils import timezone
 
-from apps.academics.models import ClassSubject, Enrollment, Subject, TeachingAssignment
+from apps.academics.models import (
+    Assignment,
+    AssignmentGrade,
+    AssignmentSubmission,
+    ClassSubject,
+    Enrollment,
+    StudentSubjectResult,
+    Subject,
+    TeachingAssignment,
+)
 from apps.attendance.models import AttendanceSession, StudentAttendance
 from apps.communication.models import Announcement
 from apps.content.models import Event
@@ -19,9 +28,21 @@ from apps.finance.services import (
     generate_fee_invoice,
     record_payment,
 )
-from apps.hr.models import Department, Employee, TeacherProfile
+from apps.hr.models import (
+    Department,
+    Duty,
+    DutyAssignment,
+    Employee,
+    HrTicket,
+    LeaveRequest,
+    LeaveType,
+    PayrollPeriod,
+    TeacherProfile,
+)
+from apps.hr.services import run_payroll
 from apps.identity.models import Person, RoleCode, User
 from apps.identity.services import assign_role
+from apps.lms.models import Lesson, Quiz, Resource, StudentTopicProgress, Topic
 from apps.people.models import Parent, ParentStudent, Student
 from apps.schools.models import (
     AcademicYear,
@@ -201,7 +222,7 @@ class Command(BaseCommand):
 
         class_teacher = self._create_class_teacher(school)
         subject_teacher = self._create_subject_teacher(school)
-        self._create_hr_admin(school)
+        hr_admin = self._create_hr_admin(school)
         self._create_finance_admin(school)
 
         if clazz and class_teacher:
@@ -213,10 +234,13 @@ class Command(BaseCommand):
         students = self._seed_students(school)
         if clazz and year:
             self._enroll_students(school, students, clazz, year)
+        if clazz and term:
+            self._seed_lms(school, students, clazz, term, subject_teacher)
         if term and clazz:
             self._seed_attendance(school, admin, clazz, students, term)
 
         self._seed_finance(school, students, term)
+        self._seed_hr(school, hr_admin)
         self._seed_content(school, admin)
 
         self.stdout.write(self.style.SUCCESS(f"  demo accounts (password: {self.password}):"))
@@ -251,7 +275,7 @@ class Command(BaseCommand):
             first_name="Amina", last_name="Wafula", email="admin@sunrise.ac.ke"
         )
         user = self._create_user(
-            person, "admin@sunrise.ac.ke", is_staff=True, is_superuser=True
+            person, "admin@sunrise.ac.ke", is_staff=True, is_superuser=False
         )
         assign_role(user, RoleCode.SCHOOL_ADMIN, school=school)
         return user
@@ -407,6 +431,118 @@ class Command(BaseCommand):
             students.append(student)
         return students
 
+    def _seed_lms(self, school, students, clazz, term, teacher):
+        """Create a usable LMS catalogue plus submissions and results for demo accounts."""
+        subjects = list(Subject.objects.filter(school=school).order_by("code"))
+        topics_by_subject = {}
+        for subject in subjects:
+            topics = []
+            for order, name in enumerate((f"{subject.name} foundations", f"{subject.name} practice"), start=1):
+                topic = Topic.objects.create(
+                    school=school,
+                    subject=subject,
+                    name=name,
+                    description=f"Build confidence in {subject.name.lower()} through guided practice.",
+                    order_number=order,
+                    status="PUBLISHED",
+                )
+                topics.append(topic)
+                for lesson_order, title in enumerate(("Watch and learn", "Guided practice"), start=1):
+                    lesson = Lesson.objects.create(
+                        school=school,
+                        topic=topic,
+                        title=f"{name}: {title}",
+                        description="A short lesson followed by a worked example.",
+                        content="Read the explanation, work through the example, then complete the practice questions.",
+                        order_number=lesson_order,
+                        status="PUBLISHED",
+                    )
+                    Resource.objects.create(
+                        school=school,
+                        lesson=lesson,
+                        title=f"{title} notes",
+                        resource_type="LINK",
+                        external_url="https://example.com/sala-learning",
+                        description="Supporting notes for this lesson.",
+                    )
+                for student in students:
+                    StudentTopicProgress.objects.create(
+                        school=school,
+                        student=student,
+                        topic=topic,
+                        progress_percentage=100 if order == 1 else 35,
+                        status="COMPLETED" if order == 1 else "IN_PROGRESS",
+                    )
+            topics_by_subject[subject.id] = topics
+            Quiz.objects.create(
+                school=school,
+                topic=topics[0],
+                title=f"{subject.name} foundations quiz",
+                instructions="Choose the best answer for each question.",
+                questions=[
+                    {"prompt": f"Which statement best describes {subject.name.lower()} practice?", "options": ["Read, practise, reflect", "Skip the examples", "Only memorise answers", "Do not review"], "answer": 0},
+                    {"prompt": "What should you do when an answer is unclear?", "options": ["Ask a question", "Leave it blank forever", "Copy without checking", "Close the lesson"], "answer": 0},
+                    {"prompt": "Which habit supports progress?", "options": ["Regular practice", "Avoiding feedback", "Skipping lessons", "Submitting empty work"], "answer": 0},
+                ],
+                max_attempts=2,
+                pass_percentage=60,
+                status="PUBLISHED",
+                published_at=timezone.now(),
+            )
+
+            teaching = TeachingAssignment.objects.filter(
+                school=school, school_class=clazz, subject=subject, term=term
+            ).first()
+            if not teaching:
+                continue
+            topic = topics[0]
+            for assignment_order, title in enumerate((f"{subject.name} practice", f"{subject.name} reflection"), start=1):
+                assignment = Assignment.objects.create(
+                    school=school,
+                    teaching_assignment=teaching,
+                    topic=topic,
+                    title=title,
+                    description="Complete the questions and explain your working.",
+                    instructions="Show your working clearly and submit before the due date.",
+                    max_marks=20,
+                    due_date=timezone.now() + timedelta(days=assignment_order * 5),
+                    submission_type=Assignment.SubmissionType.BOTH,
+                    status=Assignment.Status.PUBLISHED,
+                    created_by=teacher.user if hasattr(teacher, "user") else None,
+                    published_at=timezone.now(),
+                )
+                for student in students[:3]:
+                    submission = AssignmentSubmission.objects.create(
+                        school=school,
+                        assignment=assignment,
+                        student=student,
+                        submission_content="My completed working and answer.",
+                        submitted_at=timezone.now(),
+                        status=AssignmentSubmission.Status.SUBMITTED,
+                    )
+                    if assignment_order == 1 and student == students[0]:
+                        AssignmentGrade.objects.create(
+                            submission=submission,
+                            graded_by=teacher.user if hasattr(teacher, "user") else User.objects.filter(is_staff=True).first(),
+                            marks=16,
+                            feedback="Clear working and a well-presented answer.",
+                        )
+                        submission.status = AssignmentSubmission.Status.GRADED
+                        submission.save(update_fields=["status", "updated_at"])
+
+            for student in students:
+                StudentSubjectResult.objects.create(
+                    school=school,
+                    student=student,
+                    subject=subject,
+                    term=term,
+                    total_score=72 if subject.code != "MATH" else 64,
+                    grade="B" if subject.code != "MATH" else "B-",
+                    teacher_comment="Keep practising and ask questions when you get stuck.",
+                    status=StudentSubjectResult.Status.PUBLISHED,
+                )
+        self.stdout.write("  lms: topics, lessons, resources, progress, assignments and results created")
+
     def _enroll_students(self, school, students, clazz, year):
         for student in students:
             Enrollment.objects.get_or_create(
@@ -476,6 +612,59 @@ class Command(BaseCommand):
                     metadata={"demo": True},
                 )
         self.stdout.write("  finance: fee structure, invoices and a cash payment created")
+
+    def _seed_hr(self, school, hr_admin):
+        employees = list(Employee.objects.filter(school=school).order_by("employee_number"))
+        leave_types = []
+        for name, days, paid in (("Annual leave", 21, True), ("Sick leave", 14, True), ("Compassionate leave", 7, False)):
+            leave_types.append(LeaveType.objects.create(school=school, name=name, days_allowed=days, is_paid=paid))
+
+        if employees:
+            LeaveRequest.objects.create(
+                school=school,
+                employee=employees[0],
+                leave_type=leave_types[0],
+                start_date=timezone.localdate() + timedelta(days=14),
+                end_date=timezone.localdate() + timedelta(days=18),
+                reason="Family travel",
+                status=LeaveRequest.Status.PENDING,
+            )
+
+        today = timezone.localdate()
+        period = PayrollPeriod.objects.create(
+            school=school,
+            name=f"{today.strftime('%B')} {today.year}",
+            start_date=today.replace(day=1),
+            end_date=today,
+            status=PayrollPeriod.Status.OPEN,
+            payment_date=today + timedelta(days=3),
+        )
+        run_payroll(period, by=hr_admin)
+
+        duties = []
+        for name, location in (("Gate supervision", "Main Gate"), ("Break supervision", "Lower Field"), ("Lunch hall", "Dining Hall")):
+            duties.append(Duty.objects.create(school=school, name=name, location=location))
+        for index, duty in enumerate(duties):
+            if employees:
+                DutyAssignment.objects.create(
+                    school=school,
+                    duty=duty,
+                    employee=employees[index % len(employees)],
+                    date=today + timedelta(days=index + 1),
+                    status="SCHEDULED",
+                )
+
+        if employees:
+            HrTicket.objects.create(
+                school=school,
+                employee=employees[0],
+                category="PAYROLL",
+                subject="Payslip deduction question",
+                description="Please confirm the deduction shown on the latest payslip.",
+                priority="MEDIUM",
+                status="OPEN",
+            )
+        self.stdout.write("  hr: leave types, pending leave, payroll, duties and ticket created")
 
     def _seed_content(self, school, admin):
         Announcement.objects.create(

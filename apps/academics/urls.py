@@ -7,6 +7,7 @@ from apps.academics.views import (
     ClassSubjectViewSet,
     EnrollmentViewSet,
     LearningRecommendationViewSet,
+    StudentGroupViewSet,
     ResultViewSet,
     SubjectViewSet,
     TeachingAssignmentViewSet,
@@ -22,5 +23,6 @@ router.register(r"assessments", AssessmentViewSet, basename="assessment")
 router.register(r"assessment-scores", AssessmentScoreViewSet, basename="assessment-score")
 router.register(r"results", ResultViewSet, basename="result")
 router.register(r"learning-recommendations", LearningRecommendationViewSet, basename="learning-recommendation")
+router.register(r"groups", StudentGroupViewSet, basename="student-group")
 
 urlpatterns = router.urls

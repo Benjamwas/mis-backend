@@ -132,9 +132,9 @@ class PasswordResetRequestView(APIView):
         user = User.objects.filter(email__iexact=email).first()
         if user:
             token = PasswordResetToken.objects.create(user=user)
-            from apps.communication.tasks import send_transactional_email_job
+            from apps.communication.tasks import dispatch_transactional_email
 
-            send_transactional_email_job.delay(
+            dispatch_transactional_email(
                 to_email=user.email,
                 subject="SALA Password Reset",
                 template="password_reset",

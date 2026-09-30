@@ -45,10 +45,10 @@ def register_event_participant(*, event, full_name, email, phone="", student=Non
         school=event.school, event=event, full_name=full_name, email=email, phone=phone, student=student,
     )
 
-    from apps.communication.tasks import send_transactional_email_job
+    from apps.communication.tasks import dispatch_transactional_email
 
     if email:
-        send_transactional_email_job.delay(
+        dispatch_transactional_email(
             to_email=email,
             subject=f"Event Confirmation - {event.title}",
             template="event_confirmation",
