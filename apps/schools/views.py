@@ -6,7 +6,7 @@ from rest_framework.response import Response
 
 from apps.audit.services import audit
 from apps.common.exceptions import ValidationFailedError
-from apps.common.permissions import HasPermission, IsSuperAdmin, SchoolScopedPermission
+from apps.common.permissions import HasPermission, IsSchoolAdmin, IsSuperAdmin, SchoolScopedPermission
 from apps.common.viewsets import PlatformAdminViewSet, SchoolScopedViewSet
 from apps.identity.services import resolve_school_context
 from apps.schools.models import (
@@ -32,17 +32,26 @@ from apps.schools.serializers import (
 )
 
 
-class SchoolViewSet(PlatformAdminViewSet, viewsets.ReadOnlyModelViewSet):
-    """School administration. Super admins manage platform-wide; school admins read own school."""
+class SchoolViewSet(viewsets.ModelViewSet):
+    """Schools: superadmins manage all; school admins read/update their own school profile."""
 
     queryset = School.objects.all()
     serializer_class = SchoolSerializer
-    permission_classes = [IsSuperAdmin]
+    permission_classes = [SchoolScopedPermission]
 
     def get_serializer_class(self):
         if self.action == "retrieve":
             return SchoolDetailSerializer
         return SchoolSerializer
+
+    def get_permissions(self):
+        if self.action in ("create", "destroy"):
+            from rest_framework.permissions import IsAdminUser
+
+            return [IsAdminUser()]
+        if self.action in ("update", "partial_update"):
+            return [IsSchoolAdmin()]
+        return super().get_permissions()
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -226,7 +235,7 @@ class ModuleViewSet(viewsets.ReadOnlyModelViewSet):
 class SettingsViewSet(viewsets.ModelViewSet):
     queryset = SchoolSettings.objects.all()
     serializer_class = SchoolSettingsSerializer
-    permission_classes = [IsSuperAdmin]
+    permission_classes = [HasPermission]
     permission_code = "school.update"
     audit_module = "school"
     audit_entity_type = "SchoolSettings"
@@ -241,3 +250,16 @@ class SettingsViewSet(viewsets.ModelViewSet):
         ctx = super().get_serializer_context()
         ctx["school"] = resolve_school_context(self.request)
         return ctx
+
+    def perform_create(self, serializer):
+        school = resolve_school_context(self.request)
+        if serializer.validated_data.get("school") is None and school is not None:
+            serializer.validated_data["school"] = school
+        obj = serializer.save()
+        audit(self.request, self.request.user, "school.setting.set", "school", "SchoolSettings", str(obj.id),
+              new_value={"key": obj.key})
+
+    def perform_update(self, serializer):
+        obj = serializer.save()
+        audit(self.request, self.request.user, "school.setting.set", "school", "SchoolSettings", str(obj.id),
+              new_value={"key": obj.key})
