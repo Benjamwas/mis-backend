@@ -313,3 +313,43 @@ class LearningRecommendation(UUIDPKMixin, TimeStampedModel, SchoolScopedModel):
 
     class Meta:
         ordering = ["-created_at"]
+
+
+# --------------------------------------------------------------------------
+# Timetable
+# --------------------------------------------------------------------------
+class SchoolPeriod(UUIDPKMixin, TimeStampedModel, SchoolScopedModel):
+    name = models.CharField(max_length=40)
+    start_time = models.TimeField()
+    end_time = models.TimeField()
+    display_order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ["display_order", "start_time"]
+
+    def __str__(self):
+        return f"{self.name} ({self.start_time}-{self.end_time})"
+
+
+class TimetableSlot(UUIDPKMixin, TimeStampedModel, SchoolScopedModel):
+    DAY_CHOICES = (
+        ("MON", "Monday"), ("TUE", "Tuesday"), ("WED", "Wednesday"),
+        ("THU", "Thursday"), ("FRI", "Friday"), ("SAT", "Saturday"),
+    )
+    school_class = models.ForeignKey("schools.SchoolClass", on_delete=models.CASCADE, related_name="timetable_slots")
+    period = models.ForeignKey(SchoolPeriod, on_delete=models.CASCADE, related_name="timetable_slots")
+    teaching_assignment = models.ForeignKey(TeachingAssignment, on_delete=models.CASCADE, related_name="timetable_slots", null=True, blank=True)
+    day_of_week = models.CharField(max_length=3, choices=DAY_CHOICES, db_index=True)
+    room = models.CharField(max_length=60, blank=True, default="")
+    status = models.CharField(max_length=12, default="ACTIVE", choices=(
+        ("ACTIVE", "Active"), ("CANCELLED", "Cancelled"),
+    ))
+
+    class Meta:
+        ordering = ["day_of_week", "period__display_order"]
+        constraints = [
+            models.UniqueConstraint(fields=["school_class", "period", "day_of_week"], name="uq_timetable_slot_class_period_day"),
+        ]
+
+    def __str__(self):
+        return f"{self.school_class_id} {self.day_of_week} {self.period_id}"

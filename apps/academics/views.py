@@ -9,6 +9,8 @@ from apps.academics.models import (
     Assessment,
     AssessmentScore,
     Assignment,
+    SchoolPeriod,
+    TimetableSlot,
     AssignmentGrade,
     AssignmentSubmission,
     ClassSubject,
@@ -21,6 +23,8 @@ from apps.academics.models import (
     TeachingAssignment,
 )
 from apps.academics.serializers import (
+    SchoolPeriodSerializer,
+    TimetableSlotSerializer,
     AssessmentScoreSerializer,
     AssessmentSerializer,
     AssignmentGradeSerializer,
@@ -36,6 +40,8 @@ from apps.academics.serializers import (
     TeachingAssignmentSerializer,
 )
 from apps.academics.services import (
+    aggregate_result_for,
+    aggregate_results_for_term,
     close_enrollment,
     enroll_student,
     grade_submission,
@@ -410,6 +416,18 @@ class AssessmentViewSet(SchoolScopedViewSet):
                     },
                 )
                 created.append(score)
+        # Auto-aggregate scores into draft subject results
+        try:
+            from apps.academics.services import aggregate_result_for
+            ta = obj.teaching_assignment
+            seen = set()
+            for sc in created:
+                if sc.student_id not in seen:
+                    seen.add(sc.student_id)
+                    aggregate_result_for(sc.student, ta.subject, obj.term, by=request.user)
+        except Exception:
+            import logging
+            logging.getLogger("apps.academics").exception("Auto-aggregation after record_scores failed")
         self._audit("assessment.record", obj, new_value={"count": len(created)})
         return Response(AssessmentScoreSerializer(created, many=True).data)
 
@@ -452,6 +470,33 @@ class ResultViewSet(SchoolScopedViewSet):
         results = publish_results(result_ids, school, by=request.user)
         return Response(StudentSubjectResultSerializer(results, many=True).data)
 
+    @action(detail=False, methods=["post"], permission_classes=[HasPermission])
+    def generate(self, request):
+        """Auto-generate draft results from assessment scores for a term."""
+        self.permission_code = "result.create"
+        self.check_permission_code(self.permission_code)
+        school = self.get_school()
+        term_id = request.data.get("term_id")
+        student_id = request.data.get("student_id")
+        subject_id = request.data.get("subject_id")
+        from apps.schools.models import Term
+
+        if student_id and subject_id and term_id:
+            from apps.academics.models import Subject
+            from apps.people.models import Student
+            student = get_object_or_404(Student, id=student_id, school=school)
+            subject = get_object_or_404(Subject, id=subject_id, school=school)
+            term = get_object_or_404(Term, id=term_id, school=school)
+            result = aggregate_result_for(student, subject, term, by=request.user)
+            if not result:
+                raise ValidationFailedError("No assessment scores found for this student/subject/term.", code="NO_SCORES")
+            return Response(StudentSubjectResultSerializer(result).data)
+        if term_id:
+            term = get_object_or_404(Term, id=term_id, school=school)
+            results = aggregate_results_for_term(term, school=school, by=request.user)
+            return Response(StudentSubjectResultSerializer(results, many=True).data)
+        raise ValidationFailedError("term_id required (optional student_id + subject_id).", code="TERM_REQUIRED")
+
 
 class LearningRecommendationViewSet(SchoolScopedViewSet):
     queryset = LearningRecommendation.objects.all()
@@ -472,3 +517,81 @@ class LearningRecommendationViewSet(SchoolScopedViewSet):
 
         created = generate_learning_recommendations(student, school)
         return Response(LearningRecommendationSerializer(created, many=True).data)
+
+
+class SchoolPeriodViewSet(SchoolScopedViewSet):
+    queryset = SchoolPeriod.objects.all()
+    serializer_class = SchoolPeriodSerializer
+    permission_classes = [HasPermission]
+    permission_code = "class.read"
+    audit_module = "academics"
+    audit_entity_type = "SchoolPeriod"
+
+    def get_permissions(self):
+        if self.action in ("create", "update", "partial_update", "destroy"):
+            self.permission_code = "class.update"
+        return super().get_permissions()
+
+
+class TimetableSlotViewSet(SchoolScopedViewSet):
+    queryset = TimetableSlot.objects.select_related(
+        "school_class", "period", "teaching_assignment__subject", "teaching_assignment__teacher__person"
+    ).all()
+    serializer_class = TimetableSlotSerializer
+    permission_classes = [HasPermission]
+    permission_code = "class.read"
+    filterset_fields = ["school_class", "teaching_assignment", "day_of_week", "period", "status"]
+    audit_module = "academics"
+    audit_entity_type = "TimetableSlot"
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        user = self.request.user
+        if user.is_superuser:
+            return qs
+        school = self.get_school()
+        current_roles = set(user.user_roles.values_list("role__code", flat=True))
+        if current_roles & {"SUBJECT_TEACHER", "CLASS_TEACHER"} and school:
+            emp = user.person.hr_employees.filter(school=school).first() if user.person else None
+            if emp:
+                return qs.filter(teaching_assignment__teacher=emp)
+        student = getattr(getattr(user, "person", None), "students", None)
+        if student:
+            student = student.filter(school=school).first() if school else None
+            if student:
+                enrollment = student.enrollments.filter(status="ACTIVE").select_related("school_class").first()
+                if enrollment:
+                    return qs.filter(school_class=enrollment.school_class)
+        return qs
+
+    def get_permissions(self):
+        if self.action in ("create", "update", "partial_update", "destroy"):
+            self.permission_code = "class.update"
+        return super().get_permissions()
+
+    @action(detail=False, methods=["get"])
+    def week(self, request):
+        """Return the weekly grid: periods, days, and slots for a class or teacher."""
+        school = self.get_school()
+        class_id = request.query_params.get("class_id")
+        term_id = request.query_params.get("term_id")
+        qs = self.get_queryset().filter(status="ACTIVE")
+        if class_id:
+            qs = qs.filter(school_class_id=class_id)
+        if term_id:
+            qs = qs.filter(teaching_assignment__term_id=term_id)
+        if school and not class_id:
+            # default to first active class for teachers
+            user_roles = set(request.user.user_roles.values_list("role__code", flat=True))
+            if user_roles & {"SUBJECT_TEACHER", "CLASS_TEACHER"}:
+                emp = request.user.person.hr_employees.filter(school=school).first() if request.user.person else None
+                if emp:
+                    first = qs.filter(teaching_assignment__teacher=emp).values_list("school_class_id", flat=True).first()
+                    if first:
+                        qs = qs.filter(school_class_id=first)
+        periods = SchoolPeriod.objects.filter(school=school).order_by("display_order") if school else SchoolPeriod.objects.none()
+        return Response({
+            "periods": SchoolPeriodSerializer(periods, many=True).data,
+            "days": [c[0] for c in TimetableSlot.DAY_CHOICES[:5]],
+            "slots": TimetableSlotSerializer(qs, many=True).data,
+        })

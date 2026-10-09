@@ -236,6 +236,9 @@ class Command(BaseCommand):
             self._enroll_students(school, students, clazz, year)
         if clazz and term:
             self._seed_lms(school, students, clazz, term, subject_teacher)
+            self._seed_timetable(school, clazz, term, subject_teacher)
+            self._seed_assessments(school, students, clazz, term, subject_teacher)
+            self._seed_medical(school, students)
         if term and clazz:
             self._seed_attendance(school, admin, clazz, students, term)
 
@@ -575,6 +578,124 @@ class Command(BaseCommand):
                     status="PRESENT",
                     remarks="",
                 )
+
+    def _seed_timetable(self, school, clazz, term, teacher):
+        """Create school periods and a weekly timetable for Grade 9 A."""
+        from apps.academics.models import SchoolPeriod, TimetableSlot
+
+        periods_data = [
+            ("Period 1", "08:00", "08:40", 1),
+            ("Period 2", "08:40", "09:20", 2),
+            ("Break", "09:20", "09:40", 3),
+            ("Period 3", "09:40", "10:20", 4),
+            ("Period 4", "10:20", "11:00", 5),
+            ("Lunch", "11:00", "11:40", 6),
+            ("Period 5", "11:40", "12:20", 7),
+            ("Period 6", "12:20", "13:00", 8),
+        ]
+        periods = {}
+        for name, start, end, order in periods_data:
+            p_obj, _ = SchoolPeriod.objects.get_or_create(
+                school=school, name=name,
+                defaults={"start_time": start, "end_time": end, "display_order": order},
+            )
+            periods[name] = p_obj
+
+        assignments = list(teacher.teaching_assignments.filter(school_class=clazz, term=term)) if teacher else []
+        if not assignments:
+            return
+
+        days = ["MON", "TUE", "WED", "THU", "FRI"]
+        teaching_slots = ["Period 1", "Period 2", "Period 3", "Period 4", "Period 5", "Period 6"]
+        for di, day in enumerate(days):
+            for pi, pname in enumerate(teaching_slots):
+                if pname in ("Break", "Lunch"):
+                    continue
+                ta = assignments[(di + pi) % len(assignments)]
+                TimetableSlot.objects.get_or_create(
+                    school=school,
+                    school_class=clazz,
+                    period=periods[pname],
+                    day_of_week=day,
+                    defaults={"teaching_assignment": ta, "room": f"Room {di + 1}A"},
+                )
+
+    def _seed_assessments(self, school, students, clazz, term, teacher):
+        """Create assessments with scores so auto-aggregation has data."""
+        from apps.academics.models import Assessment, AssessmentScore
+
+        assignments = list(teacher.teaching_assignments.filter(school_class=clazz, term=term)) if teacher else []
+        if not assignments:
+            return
+
+        assessment_specs = [
+            ("Topic Quiz — Fractions", "QUIZ", "20", 0),
+            ("Class Test — Algebra", "TEST", "40", 1),
+            ("Continuous Assessment 1", "CONTINUOUS_ASSESSMENT", "30", 0),
+            ("End of Term Exam", "EXAM", "100", 0),
+        ]
+        import random
+        random.seed(42)
+
+        for title, atype, max_score, ai in assessment_specs:
+            ta = assignments[ai % len(assignments)]
+            assessment, _ = Assessment.objects.get_or_create(
+                school=school,
+                teaching_assignment=ta,
+                term=term,
+                title=title,
+                defaults={
+                    "assessment_type": atype,
+                    "max_score": max_score,
+                    "date": timezone.localdate() - timedelta(days=30 - ai * 7),
+                    "status": "PUBLISHED",
+                },
+            )
+            for student in students:
+                pct = random.uniform(0.45, 0.95)
+                score_val = round(float(max_score) * pct, 1)
+                AssessmentScore.objects.get_or_create(
+                    school=school,
+                    assessment=assessment,
+                    student=student,
+                    defaults={
+                        "score": score_val,
+                        "grade": "",
+                        "teacher_comment": "",
+                        "recorded_by": teacher.person.users.first() if teacher and teacher.person else None,
+                    },
+                )
+
+    def _seed_medical(self, school, students):
+        """Create physical examination records for each student."""
+        from apps.people.models import MedicalRecord
+
+        import random
+        random.seed(99)
+        blood_groups = ["A+", "A-", "B+", "O+", "O-", "AB+"]
+        for i, student in enumerate(students):
+            height = round(random.uniform(120, 160), 1)
+            weight = round(random.uniform(22, 52), 1)
+            MedicalRecord.objects.get_or_create(
+                school=school,
+                student=student,
+                record_date=timezone.localdate() - timedelta(days=90 - i * 10),
+                defaults={
+                    "height_cm": height,
+                    "weight_kg": weight,
+                    "blood_group": blood_groups[i % len(blood_groups)],
+                    "vision": "6/6 — Normal" if i % 3 else "6/9 — Mild myopia (right)",
+                    "hearing": "Normal",
+                    "general_condition": "Good",
+                    "allergies": "None known" if i % 2 == 0 else "Peanuts — mild",
+                    "chronic_conditions": "",
+                    "medications": "",
+                    "physical_exam_notes": "Physically fit for school activities. Posture and growth within normal range." if i % 3 else "Wears glasses for reading. Otherwise fit.",
+                    "examined_by": "Dr. Susan Kimani, School Nurse",
+                    "next_checkup_date": timezone.localdate() + timedelta(days=180),
+                    "status": "FINAL",
+                },
+            )
 
     def _seed_finance(self, school, students, term):
         structure = FeeStructure.objects.create(

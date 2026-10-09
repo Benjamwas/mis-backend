@@ -414,3 +414,106 @@ def generate_learning_recommendations(student, school):
                 created.append(rec)
 
     return created
+
+
+# --------------------------------------------------------------------------
+# Auto report generation: aggregate assessment scores into subject results
+# --------------------------------------------------------------------------
+def _score_to_grade(percentage):
+    """CBC-style banding from a 0-100 percentage."""
+    if percentage >= 80:
+        return "A"
+    if percentage >= 70:
+        return "B"
+    if percentage >= 60:
+        return "C"
+    if percentage >= 50:
+        return "D"
+    if percentage >= 40:
+        return "E"
+    return "F"
+
+
+@transaction.atomic
+def aggregate_result_for(student, subject, term, by=None):
+    """Aggregate all AssessmentScores for a student+subject+term into StudentSubjectResult.
+
+    Weighted by max_score so a 100-mark exam counts more than a 20-mark quiz.
+    Returns the updated (or unchanged) StudentSubjectResult.
+    """
+    from apps.academics.models import AssessmentScore, StudentSubjectResult
+
+    scores = AssessmentScore.objects.filter(
+        student=student,
+        assessment__teaching_assignment__subject=subject,
+        assessment__term=term,
+    ).select_related("assessment")
+
+    if not scores.exists():
+        return None
+
+    total_earned = 0
+    total_max = 0
+    for s in scores:
+        max_score = float(s.assessment.max_score or 100)
+        total_earned += float(s.score)
+        total_max += max_score
+
+    if total_max <= 0:
+        return None
+
+    percentage = round((total_earned / total_max) * 100, 2)
+    grade = _score_to_grade(percentage)
+    # Store as percentage-scaled score (0-100)
+    result, _created = StudentSubjectResult.objects.update_or_create(
+        student=student,
+        subject=subject,
+        term=term,
+        defaults={
+            "school": student.school,
+            "total_score": percentage,
+            "grade": grade,
+            "status": StudentSubjectResult.Status.DRAFT,
+        },
+    )
+    return result
+
+
+def aggregate_results_for_term(term, school=None, by=None):
+    """Aggregate all assessment scores for a term into draft results.
+
+    Returns list of updated StudentSubjectResult.
+    """
+    from apps.academics.models import AssessmentScore
+    from apps.people.models import Student
+
+    pairs = AssessmentScore.objects.filter(
+        assessment__term=term,
+    ).values_list("student_id", "assessment__teaching_assignment__subject_id").distinct()
+
+    updated = []
+    for student_id, subject_id in pairs:
+        try:
+            student = Student.objects.get(id=student_id, school=school) if school else Student.objects.get(id=student_id)
+            from apps.academics.models import Subject
+            subject = Subject.objects.get(id=subject_id)
+            result = aggregate_result_for(student, subject, term, by=by)
+            if result:
+                updated.append(result)
+        except (Student.DoesNotExist, Exception):
+            continue
+    return updated
+
+
+@transaction.atomic
+def publish_results(result_ids, school, by=None):
+    """Publish the given subject results."""
+    from apps.academics.models import StudentSubjectResult
+
+    qs = StudentSubjectResult.objects.filter(id__in=result_ids)
+    if school:
+        qs = qs.filter(school=school)
+    results = list(qs)
+    for r in results:
+        r.publish(by=by)
+    return results

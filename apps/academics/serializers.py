@@ -1,6 +1,8 @@
 from rest_framework import serializers
 
 from apps.academics.models import (
+    SchoolPeriod,
+    TimetableSlot,
     Assessment,
     AssessmentScore,
     Assignment,
@@ -194,4 +196,26 @@ class LearningRecommendationSerializer(serializers.ModelSerializer):
         model = LearningRecommendation
         fields = ["id", "school", "student", "topic", "topic_name", "subject", "subject_name",
                   "reason", "detail", "priority", "status", "created_at"]
+        read_only_fields = ["school"]
+
+
+class SchoolPeriodSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SchoolPeriod
+        fields = ["id", "school", "name", "start_time", "end_time", "display_order"]
+        read_only_fields = ["school"]
+
+
+class TimetableSlotSerializer(serializers.ModelSerializer):
+    class_name = serializers.CharField(source="school_class.display_name", read_only=True)
+    subject_name = serializers.CharField(source="teaching_assignment.subject.name", read_only=True, default="")
+    teacher_name = serializers.CharField(source="teaching_assignment.teacher.person.full_name", read_only=True, default="")
+    period_name = serializers.CharField(source="period.name", read_only=True)
+    day_display = serializers.CharField(source="get_day_of_week_display", read_only=True)
+
+    class Meta:
+        model = TimetableSlot
+        fields = ["id", "school", "school_class", "class_name", "period", "period_name",
+                  "teaching_assignment", "subject_name", "teacher_name", "day_of_week",
+                  "day_display", "room", "status"]
         read_only_fields = ["school"]

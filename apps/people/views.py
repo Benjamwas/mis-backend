@@ -9,8 +9,8 @@ from apps.audit.services import audit
 from apps.common.exceptions import ValidationFailedError
 from apps.common.permissions import HasPermission
 from apps.common.viewsets import SchoolScopedViewSet
-from apps.people.models import Parent, ParentStudent, Student
-from apps.people.serializers import ParentSerializer, ParentStudentSerializer, StudentSerializer
+from apps.people.models import MedicalRecord, Parent, ParentStudent, Student
+from apps.people.serializers import MedicalRecordSerializer, ParentSerializer, ParentStudentSerializer, StudentSerializer
 from apps.people.services import link_parent_student
 
 
@@ -250,3 +250,31 @@ class ParentViewSet(SchoolScopedViewSet):
         rel = link_parent_student(obj, student, relationship_type, is_primary)
         self._audit("parent.add_child", obj, new_value={"student_id": student_id})
         return Response(ParentStudentSerializer(rel).data, status=status.HTTP_201_CREATED)
+
+
+class MedicalRecordViewSet(SchoolScopedViewSet):
+    queryset = MedicalRecord.objects.select_related("student__person").all()
+    serializer_class = MedicalRecordSerializer
+    permission_classes = [HasPermission]
+    permission_code = "student.read"
+    filterset_fields = ["student", "status"]
+    audit_module = "students"
+    audit_entity_type = "MedicalRecord"
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        user = self.request.user
+        if user.is_superuser:
+            return qs
+        # Parents see only their children's records
+        if getattr(user, "person", None):
+            parent = user.person.parents.filter(school=self.get_school()).first() if self.get_school() else None
+            if parent:
+                child_ids = parent.children.values_list("student_id", flat=True)
+                return qs.filter(student_id__in=list(child_ids))
+        return qs
+
+    def get_permissions(self):
+        if self.action in ("create", "update", "partial_update", "destroy"):
+            self.permission_code = "student.update"
+        return super().get_permissions()

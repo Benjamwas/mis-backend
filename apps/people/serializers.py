@@ -2,7 +2,7 @@ from rest_framework import serializers
 
 from apps.identity.models import Person
 from apps.identity.serializers import PersonSerializer
-from apps.people.models import Parent, ParentStudent, RelationshipType, Student
+from apps.people.models import MedicalRecord, Parent, ParentStudent, RelationshipType, Student
 
 
 class StudentSerializer(serializers.ModelSerializer):
@@ -99,3 +99,19 @@ class ParentStudentSerializer(serializers.ModelSerializer):
         if parent and student and parent.school_id != student.school_id:
             raise serializers.ValidationError("Parent and student must belong to the same school.")
         return attrs
+
+
+class MedicalRecordSerializer(serializers.ModelSerializer):
+    student_name = serializers.CharField(source="student.full_name", read_only=True)
+    bmi = serializers.SerializerMethodField()
+
+    class Meta:
+        model = MedicalRecord
+        fields = ["id", "school", "student", "student_name", "record_date",
+                  "height_cm", "weight_kg", "bmi", "blood_group", "vision", "hearing",
+                  "general_condition", "allergies", "chronic_conditions", "medications",
+                  "physical_exam_notes", "examined_by", "next_checkup_date", "status", "created_at"]
+        read_only_fields = ["school"]
+
+    def get_bmi(self, obj):
+        return obj.bmi

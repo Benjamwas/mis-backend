@@ -85,3 +85,38 @@ class ParentStudent(UUIDPKMixin, TimeStampedModel):
 
     def __str__(self):
         return f"{self.parent_id} -> {self.student_id}"
+
+
+class MedicalRecord(UUIDPKMixin, TimeStampedModel, SchoolScopedModel):
+    """Physical examination and health record for a student."""
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name="medical_records")
+    record_date = models.DateField()
+    height_cm = models.DecimalField(max_digits=5, decimal_places=1, null=True, blank=True)
+    weight_kg = models.DecimalField(max_digits=5, decimal_places=1, null=True, blank=True)
+    blood_group = models.CharField(max_length=10, blank=True, default="")
+    vision = models.CharField(max_length=60, blank=True, default="")
+    hearing = models.CharField(max_length=60, blank=True, default="")
+    general_condition = models.CharField(max_length=120, blank=True, default="")
+    allergies = models.TextField(blank=True, default="")
+    chronic_conditions = models.TextField(blank=True, default="")
+    medications = models.TextField(blank=True, default="")
+    physical_exam_notes = models.TextField(blank=True, default="")
+    examined_by = models.CharField(max_length=160, blank=True, default="")
+    next_checkup_date = models.DateField(null=True, blank=True)
+    status = models.CharField(max_length=12, default="FINAL", choices=(
+        ("DRAFT", "Draft"), ("FINAL", "Final"),
+    ))
+
+    class Meta:
+        ordering = ["-record_date"]
+
+    @property
+    def bmi(self):
+        if self.height_cm and self.weight_kg:
+            h = float(self.height_cm) / 100
+            if h > 0:
+                return round(float(self.weight_kg) / (h * h), 1)
+        return None
+
+    def __str__(self):
+        return f"{self.student_id} exam {self.record_date}"
