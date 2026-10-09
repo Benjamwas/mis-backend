@@ -79,9 +79,17 @@ class Command(BaseCommand):
             default="password123",
             help="Password used for every seeded demo account.",
         )
+        parser.add_argument(
+            "--force",
+            action="store_true",
+            help="Re-seed even if demo data already exists.",
+        )
 
     def handle(self, *args, **options):
         self.password = options["password"]
+        if not options["force"] and School.objects.filter(code=DEMO_SCHOOL_CODE).exists():
+            self.stdout.write(self.style.SUCCESS("Demo data already present — skipping seed (use --force to re-seed)."))
+            return
         self._teardown()
         with transaction.atomic():
             self.stdout.write("Seeding demo school...")
