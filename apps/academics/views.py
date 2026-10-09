@@ -184,6 +184,20 @@ class TeachingAssignmentViewSet(SchoolScopedViewSet):
     permission_code = "subject.read"
     filterset_fields = ["teacher", "school_class", "subject", "term", "status"]
 
+    def get_queryset(self):
+        qs = super().get_queryset()
+        user = self.request.user
+        if user.is_superuser:
+            return qs
+        school = self.get_school()
+        current_roles = set(user.user_roles.values_list("role__code", flat=True))
+        if current_roles & {"SUBJECT_TEACHER", "CLASS_TEACHER"} and school:
+            emp = user.person.hr_employees.filter(school=school).first() if user.person else None
+            if emp:
+                return qs.filter(teacher=emp)
+            return qs.none()
+        return qs
+
     def get_permissions(self):
         if self.action in ("create", "update", "partial_update", "destroy"):
             self.permission_code = "subject.update"
